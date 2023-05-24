@@ -16,12 +16,13 @@ import (
 // HTTPObfs is shadowsocks http simple-obfs implementation
 type HTTPObfs struct {
 	net.Conn
-	host          string
-	port          string
-	buf           []byte
-	offset        int
-	firstRequest  bool
-	firstResponse bool
+	host                string
+	port                string
+	buf                 []byte
+	offset              int
+	firstRequest        bool
+	firstRequestBufList [][]byte
+	firstResponse       bool
 }
 
 func (ho *HTTPObfs) Read(b []byte) (int, error) {
@@ -63,9 +64,19 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 
 func (ho *HTTPObfs) Write(b []byte) (int, error) {
 	if ho.firstRequest {
+		// firstRequestBufList holds iv packet and socks addr packet and they are sent with the first data packet
+		// see https://github.com/Dreamacro/clash/pull/2765
+		if len(ho.firstRequestBufList) < 2 {
+			ho.firstRequestBufList = append(ho.firstRequestBufList, append([]byte{}, b...))
+			return len(b), nil
+		}
+
+		firstRequestBuf := append(ho.firstRequestBufList[0], ho.firstRequestBufList[1]...)
+		firstRequestBuf = append(firstRequestBuf, b...)
+
 		randBytes := make([]byte, 16)
 		rand.Read(randBytes)
-		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/", ho.host), bytes.NewBuffer(b[:]))
+		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/", ho.host), bytes.NewBuffer(firstRequestBuf))
 		req.Header.Set("User-Agent", fmt.Sprintf("curl/7.%d.%d", mathRand.Int()%54, mathRand.Int()%2))
 		req.Header.Set("Upgrade", "websocket")
 		req.Header.Set("Connection", "Upgrade")
@@ -74,9 +85,10 @@ func (ho *HTTPObfs) Write(b []byte) (int, error) {
 			req.Host = fmt.Sprintf("%s:%s", ho.host, ho.port)
 		}
 		req.Header.Set("Sec-WebSocket-Key", base64.URLEncoding.EncodeToString(randBytes))
-		req.ContentLength = int64(len(b))
+		req.ContentLength = int64(len(firstRequestBuf))
 		err := req.Write(ho.Conn)
 		ho.firstRequest = false
+		ho.firstRequestBufList = nil
 		return len(b), err
 	}
 
